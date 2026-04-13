@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base theme used for splash / system chrome before Compose takes over -->
+    <style name="Theme.TopNTown" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/tnt_primary</item>
+        <item name="android:navigationBarColor">@color/tnt_surface</item>
+        <item name="android:windowBackground">@color/tnt_background</item>
+    </style>
+</resources>

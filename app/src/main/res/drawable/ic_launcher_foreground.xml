@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Safe zone is 72x72 centered. Draw a bold "T" in white. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,38 L74,38 L74,50 L60,50 L60,78 L48,78 L48,50 L34,50 Z" />
+</vector>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TNT Brand Colors -->
+    <color name="tnt_primary">#1B3A6B</color>
+    <color name="tnt_on_primary">#FFFFFF</color>
+    <color name="tnt_primary_container">#D4E3FF</color>
+    <color name="tnt_on_primary_container">#001C3B</color>
+
+    <color name="tnt_secondary">#7B4A37</color>
+    <color name="tnt_on_secondary">#FFFFFF</color>
+    <color name="tnt_secondary_container">#FFDBD0</color>
+    <color name="tnt_on_secondary_container">#2C1509</color>
+
+    <color name="tnt_tertiary">#4A6741</color>
+    <color name="tnt_on_tertiary">#FFFFFF</color>
+
+    <color name="tnt_background">#FDFBFF</color>
+    <color name="tnt_on_background">#1A1C1E</color>
+    <color name="tnt_surface">#FDFBFF</color>
+    <color name="tnt_on_surface">#1A1C1E</color>
+
+    <color name="tnt_error">#BA1A1A</color>
+    <color name="tnt_on_error">#FFFFFF</color>
+
+    <color name="tnt_offline_banner">#D32F2F</color>
+    <color name="tnt_success">#2E7D32</color>
+</resources>

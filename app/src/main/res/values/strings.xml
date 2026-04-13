@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TopNTown</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_order">Order</string>
+    <string name="nav_beat">Beat</string>
+    <string name="nav_payments">Payments</string>
+    <string name="nav_profile">Profile</string>
+    <string name="login_title">TopNTown DMS</string>
+    <string name="login_phone_hint">Mobile Number</string>
+    <string name="login_otp_hint">Enter OTP</string>
+    <string name="login_send_otp">Send OTP</string>
+    <string name="login_verify">Verify</string>
+    <string name="offline_message">No internet connection</string>
+    <string name="loading">Loading…</string>
+</resources>
