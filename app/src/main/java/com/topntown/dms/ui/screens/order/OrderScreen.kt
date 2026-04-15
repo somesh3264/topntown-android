@@ -181,10 +181,17 @@ private fun EditableOrderContent(
     viewModel: OrderViewModel,
     contentPadding: PaddingValues
 ) {
-    // Recompute filtered view on every state change. The ViewModel owns the actual
-    // filter logic so this screen stays presentation-only.
+    // Compute filtered view directly from state. Calling a VM method inside `remember`
+    // was brittle — the VM reads `_uiState.value` (a snapshot) which can drift from the
+    // `state` the Composable observed, and callers were racing recompositions.
     val visible = remember(state.products, state.searchQuery, state.selectedCategory) {
-        viewModel.visibleProducts()
+        val query = state.searchQuery.trim()
+        val category = state.selectedCategory
+        state.products.filter { p ->
+            val categoryMatches = category.isEmpty() || p.category.equals(category, ignoreCase = true)
+            val searchMatches = query.isBlank() || p.name.contains(query, ignoreCase = true)
+            categoryMatches && searchMatches
+        }
     }
 
     Column(
@@ -220,7 +227,8 @@ private fun EditableOrderContent(
         if (visible.isEmpty()) {
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .weight(1f)
+                    .fillMaxWidth()
                     .padding(32.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -232,7 +240,15 @@ private fun EditableOrderContent(
                 )
             }
         } else {
+            // `weight(1f)` guarantees a bounded maxHeight for the LazyColumn — without
+            // it, LazyColumn inside a fillMaxSize Column can hit
+            // "Vertically scrollable component was measured with an infinity maximum
+            // height constraints" when the parent layout happens to be unbounded
+            // (e.g. when the sheet compositing pass runs).
             LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 // Leave breathing room below the FAB so the last card isn't hidden.
                 contentPadding = PaddingValues(bottom = 96.dp)
@@ -437,16 +453,39 @@ private fun ReviewOrderFab(itemCount: Int, onClick: () -> Unit) {
 
 // ---------- Review bottom sheet ----------
 
+/**
+ * Named data holder for a row in the Review sheet. Replaces a fragile
+ * `Triple<OrderProduct, Int, Double>` whose destructuring-in-lambda pattern was
+ * causing a crash when combined with LazyListScope.items's `key =` parameter
+ * on some Kotlin/Compose compiler combinations.
+ */
+private data class ReviewLineItem(
+    val product: OrderProduct,
+    val qty: Int,
+    val lineTotal: Double
+)
+
 @Composable
 private fun ReviewOrderSheet(
     state: OrderUiState,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val lineItems = remember(state.products, state.quantities) {
+    // Build line items defensively:
+    //  - skip products with blank ids (would otherwise collide as LazyColumn keys)
+    //  - de-duplicate by id so `items(key=...)` never sees duplicates
+    val lineItems: List<ReviewLineItem> = remember(state.products, state.quantities) {
+        val seen = HashSet<String>()
         state.products.mapNotNull { product ->
-            val qty = state.quantities[product.id] ?: 0
-            if (qty > 0) Triple(product, qty, qty * product.distributorPrice) else null
+            val id = product.id
+            if (id.isBlank() || !seen.add(id)) return@mapNotNull null
+            val qty = state.quantities[id] ?: 0
+            if (qty <= 0) null
+            else ReviewLineItem(
+                product = product,
+                qty = qty,
+                lineTotal = qty * product.distributorPrice
+            )
         }
     }
 
@@ -463,35 +502,55 @@ private fun ReviewOrderSheet(
         )
         Spacer(Modifier.height(12.dp))
 
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 360.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(lineItems, key = { it.first.id }) { (product, qty, lineTotal) ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(product.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        if (lineItems.isEmpty()) {
+            // Guard: the FAB gates on itemCount > 0, but itemCount sums `quantities` while
+            // lineItems sums `products` — if the two ever drift (bad product id, stale
+            // draft, etc.) the sheet used to render an empty list with no feedback.
+            Text(
+                text = "Add at least one product before reviewing.",
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(vertical = 24.dp)
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(
+                    items = lineItems,
+                    key = { item -> item.product.id }
+                ) { item ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(item.product.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Qty ${item.qty} × ₹%.2f".format(item.product.distributorPrice),
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         Text(
-                            "Qty $qty × ₹%.2f".format(product.distributorPrice),
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            "₹%.2f".format(item.lineTotal),
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold
                         )
                     }
-                    Text(
-                        "₹%.2f".format(lineTotal),
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold
-                    )
                 }
             }
         }
 
         Spacer(Modifier.height(16.dp))
+
+        // Keep grand-total consistent with what's actually listed above — don't rely
+        // on state.grandTotal which sums ALL products (including ones we might have
+        // skipped above because of duplicate / blank ids).
+        val displayedTotal = lineItems.sumOf { it.lineTotal }
 
         Row(
             modifier = Modifier
@@ -502,7 +561,7 @@ private fun ReviewOrderSheet(
         ) {
             Text("Grand Total", fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Text(
-                "₹%.2f".format(state.grandTotal),
+                "₹%.2f".format(displayedTotal),
                 fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary
@@ -513,6 +572,7 @@ private fun ReviewOrderSheet(
 
         Button(
             onClick = onConfirm,
+            enabled = lineItems.isNotEmpty(),
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(min = 56.dp),

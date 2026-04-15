@@ -1,5 +1,6 @@
 package com.topntown.dms.ui.screens.order
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.topntown.dms.data.datastore.UserPreferences
@@ -248,9 +249,20 @@ class OrderViewModel @Inject constructor(
     }
 
     /**
-     * Look for an order the distributor has already started/placed today. We filter on
-     * created_at >= start-of-today rather than a dedicated `order_date` column so the
+     * Look for an editable order the distributor has already started/placed today. We filter
+     * on created_at >= start-of-today rather than a dedicated `order_date` column so the
      * screen works with the schema as shipped (no migration required).
+     *
+     * Billed orders are intentionally excluded: once the nightly bill is generated (or an
+     * admin taps "Generate Bill" on the dashboard) the order row flips to status='billed'
+     * and is finalised. Previously we still loaded that row here, which forced the whole
+     * screen into OrderMode.ReadOnly and hid every stepper — meaning a distributor whose
+     * earlier order was already billed could not place a second order during the same
+     * ordering window. The schema permits multiple orders per (distributor, order_date)
+     * (only an index, no unique constraint on orders(distributor_id, order_date)), so the
+     * right behaviour is to treat a billed order as "in the rear-view mirror" and let the
+     * distributor start a fresh editable order. Any remaining draft/confirmed row is still
+     * picked up and its quantities are prefilled as before.
      */
     private suspend fun loadTodaysOrder(distributorId: String): ExistingOrderRow? = withContext(Dispatchers.IO) {
         val startOfToday = LocalDate.now()
@@ -266,6 +278,9 @@ class OrderViewModel @Inject constructor(
                     filter {
                         eq("distributor_id", distributorId)
                         gte("created_at", startOfToday)
+                        // Skip finalised rows so billed orders don't lock the screen into
+                        // ReadOnly. See the kdoc above for the full reasoning.
+                        neq("status", "billed")
                     }
                     order("created_at", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
                     limit(1)
@@ -380,7 +395,9 @@ class OrderViewModel @Inject constructor(
                 val rpcBody = buildJsonObject {
                     put("p_distributor_id", distributorId)
                     put("p_total_amount", state.grandTotal)
-                    put("p_existing_order_id", state.existingOrderId ?: "")
+                    // Pass JSON null (not an empty string!) when there's no existing
+                    // order — Postgres will reject "" as an invalid UUID otherwise.
+                    put("p_existing_order_id", state.existingOrderId)
                     put("p_items", buildJsonArray {
                         items.forEach { (product, qty) ->
                             addJsonObject {
@@ -395,13 +412,23 @@ class OrderViewModel @Inject constructor(
                 }
 
                 withContext(Dispatchers.IO) {
-                    // We don't need the return value — the RPC is expected to be idempotent
-                    // and either succeeds or throws. Any non-2xx response lands in catch below.
-                    //
-                    // In supabase-kt 2.5.x `rpc(...)` lives on the SupabaseClient's postgrest
-                    // extension, not on the injected `Postgrest` plugin instance itself,
-                    // so we route through the singleton client here.
-                    SupabaseClientProvider.client.postgrest.rpc("submit_distributor_order", rpcBody)
+                    try {
+                        // Preferred path: atomic server-side RPC.
+                        SupabaseClientProvider.client.postgrest.rpc("submit_distributor_order", rpcBody)
+                    } catch (rpcError: Throwable) {
+                        // Fallback: if the RPC isn't deployed yet ("Could not find the function",
+                        // PGRST202, 404 etc.) we fall back to a direct INSERT/UPDATE of the
+                        // `orders` + `order_items` rows so the app remains functional during
+                        // pre-integration testing. Any other error (auth, RLS, schema) is
+                        // rethrown so it surfaces in the snackbar.
+                        if (!isRpcMissingError(rpcError)) throw rpcError
+                        submitViaDirectWrite(
+                            distributorId = distributorId,
+                            existingOrderId = state.existingOrderId,
+                            totalAmount = state.grandTotal,
+                            items = items
+                        )
+                    }
                 }
 
                 _uiState.update {
@@ -412,11 +439,119 @@ class OrderViewModel @Inject constructor(
                     )
                 }
             } catch (t: Throwable) {
+                // Full stack trace goes to Logcat under the "OrderSubmit" tag — filter on
+                // that in Android Studio to see the complete error body (PostgREST returns
+                // the failing constraint / RLS policy in the response text).
+                Log.e("OrderSubmit", "submitOrder failed", t)
+
                 _uiState.update {
-                    it.copy(submitResult = SubmitResult.Error(t.message ?: "Could not submit order"))
+                    it.copy(submitResult = SubmitResult.Error(friendlySubmitError(t)))
                 }
             }
         }
     }
+
+    /**
+     * The raw error from ktor/Supabase often contains the full request URL and the
+     * Bearer JWT — neither is safe or useful in a user-facing snackbar. This strips
+     * them and returns a short, readable message. The complete text is still in Logcat.
+     */
+    private fun friendlySubmitError(t: Throwable): String {
+        val raw = t.message ?: return "Could not submit order"
+
+        // Prefer a PostgREST JSON body if one is embedded in the message.
+        val jsonStart = raw.indexOf('{')
+        val jsonEnd = raw.lastIndexOf('}')
+        if (jsonStart in 0 until jsonEnd) {
+            val body = raw.substring(jsonStart, jsonEnd + 1)
+            Regex("\"message\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.getOrNull(1)?.let {
+                return it.take(200)
+            }
+            Regex("\"hint\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.getOrNull(1)?.let {
+                return it.take(200)
+            }
+        }
+
+        // Otherwise strip the request URL + headers dump so at least the human-readable
+        // prefix survives.
+        val urlCut = raw.indexOf("https://")
+        val headersCut = raw.indexOf("Headers:")
+        val cutAt = listOf(urlCut, headersCut).filter { it >= 0 }.minOrNull() ?: raw.length
+        return raw.substring(0, cutAt).trim().ifBlank { "Could not submit order" }.take(200)
+    }
+
+    /** Heuristic: does this look like "RPC function not found on the backend"? */
+    private fun isRpcMissingError(t: Throwable): Boolean {
+        val msg = (t.message ?: "").lowercase()
+        return "could not find the function" in msg ||
+            "pgrst202" in msg ||
+            "function " in msg && "does not exist" in msg ||
+            "404" in msg && "rpc" in msg
+    }
+
+    /**
+     * Fallback write path used when the `submit_distributor_order` RPC isn't available.
+     *
+     * This is NOT atomic — an app/network failure between the two writes can leave the
+     * orders row without items. Real production submissions should go through the RPC.
+     * We keep this here strictly so the UI remains usable before that migration ships.
+     */
+    private suspend fun submitViaDirectWrite(
+        distributorId: String,
+        existingOrderId: String?,
+        totalAmount: Double,
+        items: List<Pair<OrderProduct, Int>>
+    ) {
+        val orderId: String = if (existingOrderId.isNullOrBlank()) {
+            // Fresh order — INSERT and read the id back. Columns match the actual
+            // `orders` schema: distributor_id, order_date, status, total_amount.
+            // (`id` and `created_at` are filled by defaults; there is no
+            // `updated_at`, `store_id`, or `salesman_id`.)
+            val inserted = postgrest.from("orders")
+                .insert(
+                    buildJsonObject {
+                        put("distributor_id", distributorId)
+                        put("order_date", LocalDate.now().toString())
+                        put("status", "confirmed")
+                        put("total_amount", totalAmount)
+                    }
+                ) { select(Columns.list("id")) }
+                .decodeList<InsertedOrderId>()
+                .firstOrNull()
+                ?: throw IllegalStateException("Order insert returned no row")
+            inserted.id
+        } else {
+            // Existing draft — UPDATE the status/total, then wipe and re-insert items.
+            postgrest.from("orders")
+                .update({
+                    set("status", "confirmed")
+                    set("total_amount", totalAmount)
+                }) {
+                    filter { eq("id", existingOrderId) }
+                }
+            postgrest.from("order_items")
+                .delete { filter { eq("order_id", existingOrderId) } }
+            existingOrderId
+        }
+
+        if (items.isNotEmpty()) {
+            // `order_items` has only: id, order_id, product_id, quantity, unit_price,
+            // created_at. No product_name or line_total columns — don't send them.
+            val itemRows = buildJsonArray {
+                items.forEach { (product, qty) ->
+                    addJsonObject {
+                        put("order_id", orderId)
+                        put("product_id", product.id)
+                        put("quantity", qty)
+                        put("unit_price", product.distributorPrice)
+                    }
+                }
+            }
+            postgrest.from("order_items").insert(itemRows)
+        }
+    }
+
+    @Serializable
+    private data class InsertedOrderId(val id: String = "")
 }
 
