@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Notifications
+import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -32,12 +32,14 @@ import androidx.navigation.compose.rememberNavController
 import com.topntown.dms.data.repository.AuthRepository
 import com.topntown.dms.ui.components.OfflineNotice
 import com.topntown.dms.ui.screens.beat.BeatScreen
+import com.topntown.dms.ui.screens.beat.DeliveryEntryScreen
 import com.topntown.dms.ui.screens.bill.BillScreen
 import com.topntown.dms.ui.screens.home.HomeScreen
 import com.topntown.dms.ui.screens.login.LoginScreen
 import com.topntown.dms.ui.screens.order.OrderScreen
 import com.topntown.dms.ui.screens.payments.PaymentsScreen
 import com.topntown.dms.ui.screens.profile.ProfileScreen
+import com.topntown.dms.ui.screens.stock.StockScreen
 import com.topntown.dms.ui.screens.store.StoreOnboardingScreen
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,8 +56,15 @@ object Routes {
     const val LOGIN = "login"
     const val HOME = "home"
     const val ORDER = "order"
+    // BEAT is backed by the label "Deliver" in the bottom nav (see BottomNavBar).
+    // Route name kept stable for navigation-state compatibility.
     const val BEAT = "beat"
+    /** Per-store delivery entry screen. Parameterised by store UUID. */
+    const val DELIVER_ENTRY = "deliver_entry/{storeId}"
+    fun deliverEntry(storeId: String) = "deliver_entry/$storeId"
+    // PAYMENTS is backed by the label "Pay" in the bottom nav.
     const val PAYMENTS = "payments"
+    const val STOCK = "stock"
     const val BILL = "bill"
     const val PROFILE = "profile"
     const val STORE_ONBOARDING = "store_onboarding"
@@ -63,14 +72,16 @@ object Routes {
 
 /**
  * Screens that show the bottom navigation bar. Splash and Login intentionally
- * omitted — they take the full screen with no chrome.
+ * omitted — they take the full screen with no chrome. Profile is reachable via
+ * the top-app-bar profile icon rather than a bottom tab, so it doesn't appear
+ * here either.
  */
 private val bottomNavScreens = setOf(
     Routes.HOME,
     Routes.ORDER,
     Routes.BEAT,
     Routes.PAYMENTS,
-    Routes.PROFILE
+    Routes.STOCK
 )
 
 /** Screens that deserve the thin top app bar (logo + notifications bell). */
@@ -135,10 +146,19 @@ fun NavGraph(
                         )
                     },
                     actions = {
-                        IconButton(onClick = { /* notifications — wired in a later sprint */ }) {
+                        // Profile access moved here from the bottom-nav tab.
+                        // Tapping opens the Profile screen where the user can
+                        // sign out. Kept as a small icon in the corner — we
+                        // don't want a prominent button competing with the
+                        // primary content.
+                        IconButton(onClick = {
+                            navController.navigate(Routes.PROFILE) {
+                                launchSingleTop = true
+                            }
+                        }) {
                             Icon(
-                                imageVector = Icons.Outlined.Notifications,
-                                contentDescription = "Notifications"
+                                imageVector = Icons.Outlined.AccountCircle,
+                                contentDescription = "Profile"
                             )
                         }
                     },
@@ -211,8 +231,31 @@ fun NavGraph(
                     BeatScreen(navController = navController)
                 }
 
+                composable(
+                    route = Routes.DELIVER_ENTRY,
+                    arguments = listOf(
+                        androidx.navigation.navArgument("storeId") { type = androidx.navigation.NavType.StringType }
+                    )
+                ) { backStackEntry ->
+                    val storeId = backStackEntry.arguments?.getString("storeId").orEmpty()
+                    DeliveryEntryScreen(
+                        storeId = storeId,
+                        onBack = { navController.popBackStack() },
+                        onDone = {
+                            // After successful delivery, return to the Deliver list so the
+                            // distributor can pick another store. popUpTo(BEAT) keeps the
+                            // back stack clean.
+                            navController.popBackStack(route = Routes.BEAT, inclusive = false)
+                        }
+                    )
+                }
+
                 composable(Routes.PAYMENTS) {
                     PaymentsScreen(navController = navController)
+                }
+
+                composable(Routes.STOCK) {
+                    StockScreen()
                 }
 
                 composable(Routes.BILL) {

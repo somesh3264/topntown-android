@@ -166,27 +166,22 @@ class OrderViewModel @Inject constructor(
                 }
 
                 val products = loadProducts()
-                val existing = loadTodaysOrder(distributorId)
 
-                val initialQuantities: Map<String, Int> = existing
-                    ?.orderItems
-                    ?.associate { it.productId to it.quantity }
-                    .orEmpty()
-
-                val mode = when (existing?.status) {
-                    "billed" -> OrderMode.ReadOnly
-                    else -> OrderMode.Editable
-                }
-
+                // Product decision: every "Place Order" is a NEW order. No
+                // prefill, no amendment of previously-placed orders inline.
+                // The schema permits multiple orders per (distributor,
+                // order_date); billing at 10 PM picks up every confirmed row
+                // independently. If the distributor needs to correct a
+                // mistake after placing, they call the support line.
                 _uiState.update {
                     it.copy(
                         isLoading = false,
                         products = products,
-                        quantities = initialQuantities,
+                        quantities = emptyMap(),
                         cutoffEpochMillis = cutoffMillis,
                         supportPhone = supportPhone,
-                        mode = mode,
-                        existingOrderId = existing?.id
+                        mode = OrderMode.Editable,
+                        existingOrderId = null
                     )
                 }
             } catch (t: Throwable) {
@@ -265,22 +260,35 @@ class OrderViewModel @Inject constructor(
      * picked up and its quantities are prefilled as before.
      */
     private suspend fun loadTodaysOrder(distributorId: String): ExistingOrderRow? = withContext(Dispatchers.IO) {
-        val startOfToday = LocalDate.now()
-            .atStartOfDay(ZoneId.systemDefault())
+        // Use IST explicitly — the business operates in IST and order_date is a
+        // date column interpreted in IST. systemDefault() would be wrong if the
+        // phone ever drifts to a different TZ (roaming, edge-of-TZ zones).
+        val startOfToday = LocalDate.now(ZoneId.of("Asia/Kolkata"))
+            .atStartOfDay(ZoneId.of("Asia/Kolkata"))
             .toInstant()
             .toString()
 
         runCatching {
             // Embedded select: orders + their order_items rows in one round-trip. Matches
             // the shape of ExistingOrderRow (flat status/id + list of items).
+            //
+            // Status exclusions — every terminal / locked state must be here so a
+            // past-today order never gets pre-loaded as "today's editable draft":
+            //   billed     → bill generated (locked)
+            //   dispatched → picked up from factory (locked, awaiting delivery)
+            //   delivered  → fully delivered
+            //   cancelled  → wash
+            // Only draft and confirmed remain — both of which are legitimately
+            // editable before cut-off.
             postgrest.from("orders")
                 .select(Columns.raw("id, status, order_items(product_id, quantity)")) {
                     filter {
                         eq("distributor_id", distributorId)
                         gte("created_at", startOfToday)
-                        // Skip finalised rows so billed orders don't lock the screen into
-                        // ReadOnly. See the kdoc above for the full reasoning.
                         neq("status", "billed")
+                        neq("status", "dispatched")
+                        neq("status", "delivered")
+                        neq("status", "cancelled")
                     }
                     order("created_at", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
                     limit(1)

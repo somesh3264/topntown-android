@@ -6,7 +6,7 @@ import com.topntown.dms.data.datastore.UserPreferences
 import com.topntown.dms.data.datastore.UserSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.github.jan.supabase.postgrest.Postgrest
-import io.github.jan.supabase.postgrest.query.Columns
+import io.github.jan.supabase.postgrest.rpc
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,89 +15,82 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import java.time.Duration
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.LocalTime
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 
 /**
- * Derived state for the home dashboard. Kept as a flat data class rather than
- * a sealed hierarchy because every KPI refreshes together — there's no partial
- * success state worth rendering separately.
+ * UI state for the distributor Home screen. All KPIs come from a single
+ * RPC (get_distributor_home); the "Today's Deliveries" list comes from a
+ * second RPC (get_todays_deliveries). Countdown / greeting are derived
+ * client-side from cut-off time.
  */
 data class HomeUiState(
     val session: UserSession = UserSession(),
     val greetingSegment: String = "morning",          // "morning" | "afternoon" | "evening"
 
     // KPI tiles
-    val deliveriesToday: Int = 0,
-    val assignedStoresToday: Int = 0,
-    val billReady: Boolean = false,
-    val billLabel: String = "Awaiting tonight's bill",
-    val stockRemainingPct: Int = 0,
-    val paymentsCollectedInr: Double = 0.0,
+    val deliveriesCount: Int = 0,
+    val cashCollectedInr: Double = 0.0,
+    val skusRemaining: Int = 0,
+    val storesOnBeat: Int = 0,
 
-    // Stock breakdown
-    val topStock: List<StockRow> = emptyList(),
+    // Today's deliveries list (underneath the KPI grid)
+    val todaysDeliveries: List<DeliveryItem> = emptyList(),
 
-    // Action button gating — Place Order is disabled after the daily cut-off
-    // (default 18:00 local), which is when the distributor backend starts
-    // compiling tonight's consolidated bill.
-    val placeOrderEnabled: Boolean = true,
-    val cutOffStatus: String = "",
+    // Cut-off — drives the countdown card at the top of Home
+    val cutoffTime: String = "14:00",   // HH:MM (IST)
+    val cutoffEnabled: Boolean = true,
+    val cutoffPassed: Boolean = false,
+    val timeUntilCutoff: String = "",   // "13h 2m" or "" when passed
 
     val isLoading: Boolean = true,
     val isRefreshing: Boolean = false,
     val errorMessage: String? = null
 )
 
-data class StockRow(
-    val sku: String,
-    val productName: String,
-    val allocated: Int,
-    val remaining: Int
-) {
-    /** 0f..1f — clamped so a negative/inflated backend value can't blow up the bar. */
-    val progress: Float
-        get() = if (allocated <= 0) 0f
-        else (remaining.toFloat() / allocated.toFloat()).coerceIn(0f, 1f)
-}
+data class DeliveryItem(
+    val id: String,
+    val storeName: String,
+    val itemCount: Int,
+    val deliveredAt: String, // pre-formatted "09:12 AM" style
+    val totalValue: Double
+)
 
-/**
- * Shape of the `bills` row we care about on Home. Defined inline (rather than
- * adding to domain/model/Models.kt) because only this screen consumes it
- * today; we can promote it later if Bill screens start using the same fields.
- */
+// ── RPC DTOs ─────────────────────────────────────────────────────────────────
+// Must match the column names of the RETURNS TABLE clauses in the migration
+// 20260420140000_distributor_app_rpcs.sql.
+
 @Serializable
-private data class BillRow(
-    val id: String = "",
-    @SerialName("distributor_id") val distributorId: String = "",
-    @SerialName("bill_date") val billDate: String = "",
-    val status: String = "pending"
+private data class HomeRpcRow(
+    @SerialName("full_name") val fullName: String? = null,
+    @SerialName("deliveries_count") val deliveriesCount: Int = 0,
+    @SerialName("cash_collected") val cashCollected: Double = 0.0,
+    @SerialName("skus_remaining") val skusRemaining: Double = 0.0,
+    @SerialName("stores_on_beat") val storesOnBeat: Int = 0,
+    @SerialName("cutoff_time") val cutoffTime: String = "14:00",
+    @SerialName("cutoff_enabled") val cutoffEnabled: Boolean = true,
+    @SerialName("support_contact") val supportContact: String? = null
 )
 
 @Serializable
-private data class StockAllocationRow(
-    val id: String = "",
-    @SerialName("distributor_id") val distributorId: String = "",
-    @SerialName("bill_id") val billId: String = "",
-    @SerialName("product_id") val productId: String = "",
-    val sku: String = "",
-    @SerialName("product_name") val productName: String = "",
-    @SerialName("quantity_allocated") val allocated: Int = 0,
-    @SerialName("quantity_remaining") val remaining: Int = 0
+private data class DeliveryRpcRow(
+    @SerialName("delivery_id") val deliveryId: String = "",
+    @SerialName("store_id") val storeId: String = "",
+    @SerialName("store_name") val storeName: String? = null,
+    @SerialName("item_count") val itemCount: Int = 0,
+    @SerialName("delivered_at") val deliveredAt: String = "",
+    @SerialName("total_value") val totalValue: Double = 0.0
 )
 
-@Serializable
-private data class PaymentAmountRow(val amount: Double = 0.0)
-
-@Serializable
-private data class DeliveryCountRow(val id: String = "")
-
-/** Daily cut-off after which distributors can no longer place new orders. */
-private val ORDER_CUTOFF: LocalTime = LocalTime.of(18, 0)
+private val IST = ZoneId.of("Asia/Kolkata")
+private val TIME_DISPLAY_FMT = DateTimeFormatter.ofPattern("hh:mm a")
 
 @HiltViewModel
 class HomeViewModel @Inject constructor(
@@ -109,157 +102,79 @@ class HomeViewModel @Inject constructor(
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     init {
-        // Session is the source of truth for distributor_id; every KPI query
-        // is scoped by it, so we collect it first, then fan out.
+        // First: pick up session (for full_name fallback + re-auth recovery).
         viewModelScope.launch {
             userPreferences.sessionFlow.collect { session ->
-                _uiState.update { it.copy(session = session, greetingSegment = currentGreetingSegment()) }
-                if (session.isValid) {
-                    loadDashboard(session, isRefresh = false)
+                _uiState.update {
+                    it.copy(
+                        session = session,
+                        greetingSegment = currentGreetingSegment()
+                    )
                 }
+                if (session.isValid) loadHome(isRefresh = false)
             }
         }
     }
 
-    /**
-     * Pull-to-refresh entry point. Uses the session already in state; we
-     * intentionally don't re-read DataStore here — the collector in [init]
-     * keeps [HomeUiState.session] current.
-     */
     fun refresh() {
-        val session = _uiState.value.session
-        if (!session.isValid) return
-        viewModelScope.launch { loadDashboard(session, isRefresh = true) }
+        if (!_uiState.value.session.isValid) return
+        viewModelScope.launch { loadHome(isRefresh = true) }
     }
 
-    private suspend fun loadDashboard(session: UserSession, isRefresh: Boolean) {
+    private suspend fun loadHome(isRefresh: Boolean) {
         _uiState.update {
             it.copy(
                 isLoading = !isRefresh && it.isLoading,
                 isRefreshing = isRefresh,
                 errorMessage = null,
-                greetingSegment = currentGreetingSegment(),
-                placeOrderEnabled = LocalTime.now().isBefore(ORDER_CUTOFF),
-                cutOffStatus = cutOffStatusText()
+                greetingSegment = currentGreetingSegment()
             )
         }
 
-        val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
-        val distributorId = session.userId
-
-        // Run all four queries in parallel on the IO dispatcher. Each call is
-        // wrapped in its own runCatching so one failed query (e.g. a missing
-        // bill row) doesn't wipe the other KPIs.
         withContext(Dispatchers.IO) {
-            val deliveriesJob = async {
+            val homeJob = async {
                 runCatching {
-                    postgrest.from("deliveries")
-                        .select(Columns.raw("id")) {
-                            filter {
-                                eq("distributor_id", distributorId)
-                                eq("delivery_date", today)
-                            }
-                        }
-                        .decodeList<DeliveryCountRow>()
-                        .size
-                }.getOrDefault(0)
-            }
-
-            val assignedStoresJob = async {
-                runCatching {
-                    postgrest.from("stores")
-                        .select(Columns.raw("id")) {
-                            filter {
-                                eq("distributor_id", distributorId)
-                                eq("is_active", true)
-                            }
-                        }
-                        .decodeList<DeliveryCountRow>()
-                        .size
-                }.getOrDefault(0)
-            }
-
-            val billJob = async {
-                runCatching {
-                    postgrest.from("bills")
-                        .select(Columns.ALL) {
-                            filter {
-                                eq("distributor_id", distributorId)
-                                eq("bill_date", today)
-                            }
-                            limit(1)
-                        }
-                        .decodeList<BillRow>()
+                    postgrest.rpc("get_distributor_home")
+                        .decodeList<HomeRpcRow>()
                         .firstOrNull()
                 }.getOrNull()
             }
 
-            val stockJob = async {
+            val deliveriesJob = async {
                 runCatching {
-                    postgrest.from("stock_allocations")
-                        .select(Columns.ALL) {
-                            filter { eq("distributor_id", distributorId) }
-                            order("quantity_remaining", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
-                        }
-                        .decodeList<StockAllocationRow>()
+                    postgrest.rpc("get_todays_deliveries")
+                        .decodeList<DeliveryRpcRow>()
                 }.getOrDefault(emptyList())
             }
 
-            val paymentsJob = async {
-                runCatching {
-                    // Postgrest doesn't easily support DATE(collected_at) via
-                    // filter DSL, so we filter on the half-open [today, tomorrow)
-                    // window, which is index-friendly anyway.
-                    val tomorrow = LocalDate.now().plusDays(1).format(DateTimeFormatter.ISO_LOCAL_DATE)
-                    postgrest.from("payments")
-                        .select(Columns.raw("amount")) {
-                            filter {
-                                eq("distributor_id", distributorId)
-                                gte("collected_at", today)
-                                lt("collected_at", tomorrow)
-                            }
-                        }
-                        .decodeList<PaymentAmountRow>()
-                        .sumOf { it.amount }
-                }.getOrDefault(0.0)
-            }
+            val home = homeJob.await()
+            val deliveriesRaw = deliveriesJob.await()
 
-            // awaitAll() can't return a mixed-type tuple, so await each Deferred
-            // individually. Because all five were launched via `async` before
-            // the first `.await()`, they still execute concurrently.
-            val deliveries = deliveriesJob.await()
-            val assigned = assignedStoresJob.await()
-            val bill = billJob.await()
-            val stock = stockJob.await()
-            val payments = paymentsJob.await()
-
-            val totalAllocated = stock.sumOf { it.allocated }
-            val totalRemaining = stock.sumOf { it.remaining }
-            val remainingPct = if (totalAllocated > 0) {
-                ((totalRemaining.toDouble() / totalAllocated.toDouble()) * 100).toInt()
-            } else 0
-
-            val billReady = bill?.status?.equals("ready", ignoreCase = true) == true
-            val billLabel = when {
-                billReady -> "Bill Ready"
-                bill != null -> "Bill ${bill.status.replaceFirstChar { it.uppercase() }}"
-                else -> "Awaiting tonight's bill"
-            }
+            val cutoffTime = home?.cutoffTime ?: "14:00"
+            val (cutoffPassed, msUntil) = computeCutoffState(cutoffTime)
 
             _uiState.update {
                 it.copy(
-                    deliveriesToday = deliveries,
-                    assignedStoresToday = assigned,
-                    billReady = billReady,
-                    billLabel = billLabel,
-                    stockRemainingPct = remainingPct,
-                    paymentsCollectedInr = payments,
-                    topStock = stock.take(5).map { row ->
-                        StockRow(
-                            sku = row.sku,
-                            productName = row.productName,
-                            allocated = row.allocated,
-                            remaining = row.remaining
+                    // Prefer RPC's full_name so the screen updates when profile
+                    // changes without requiring a new login session.
+                    session = if (!home?.fullName.isNullOrBlank())
+                        it.session.copy(fullName = home!!.fullName!!)
+                    else it.session,
+                    deliveriesCount = home?.deliveriesCount ?: 0,
+                    cashCollectedInr = home?.cashCollected ?: 0.0,
+                    skusRemaining = (home?.skusRemaining ?: 0.0).toInt(),
+                    storesOnBeat = home?.storesOnBeat ?: 0,
+                    cutoffTime = cutoffTime,
+                    cutoffEnabled = home?.cutoffEnabled ?: true,
+                    cutoffPassed = cutoffPassed,
+                    timeUntilCutoff = if (cutoffPassed) "" else formatHoursMinutes(msUntil),
+                    todaysDeliveries = deliveriesRaw.map { r ->
+                        DeliveryItem(
+                            id = r.deliveryId,
+                            storeName = r.storeName ?: "(unnamed store)",
+                            itemCount = r.itemCount,
+                            deliveredAt = formatDeliveredAt(r.deliveredAt),
+                            totalValue = r.totalValue
                         )
                     },
                     isLoading = false,
@@ -270,7 +185,7 @@ class HomeViewModel @Inject constructor(
     }
 
     private fun currentGreetingSegment(): String {
-        val hour = LocalTime.now().hour
+        val hour = LocalDateTime.now(IST).hour
         return when {
             hour < 12 -> "morning"
             hour < 17 -> "afternoon"
@@ -278,13 +193,33 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    private fun cutOffStatusText(): String {
-        val now = LocalTime.now()
-        return if (now.isBefore(ORDER_CUTOFF)) {
-            "Order cut-off at ${ORDER_CUTOFF.format(DateTimeFormatter.ofPattern("h:mm a"))}"
-        } else {
-            "Cut-off passed — orders resume tomorrow"
-        }
+    /**
+     * Returns (passed, msUntilNext). If today's cut-off has already passed,
+     * the "next" cut-off is tomorrow, and passed=true.
+     */
+    private fun computeCutoffState(hhmm: String): Pair<Boolean, Long> {
+        val parts = hhmm.split(":").mapNotNull { it.toIntOrNull() }
+        if (parts.size != 2) return false to 0L
+        val now = LocalDateTime.now(IST)
+        var target = LocalDateTime.of(now.toLocalDate(), LocalTime.of(parts[0], parts[1]))
+        val passed = !now.isBefore(target)
+        if (passed) target = target.plusDays(1)
+        val duration = Duration.between(now, target).toMillis()
+        return passed to duration
     }
-}
 
+    private fun formatHoursMinutes(ms: Long): String {
+        if (ms <= 0) return "0h 0m"
+        val totalMin = ms / 60_000
+        val h = totalMin / 60
+        val m = totalMin % 60
+        return "${h}h ${m}m"
+    }
+
+    /** Accepts an ISO8601 timestamp and returns "09:12 AM" in IST, or "—" on parse fail. */
+    private fun formatDeliveredAt(iso: String): String = runCatching {
+        // Supabase returns timestamptz as ISO with offset, e.g. 2026-04-20T09:12:34.567+00:00
+        val parsed = java.time.OffsetDateTime.parse(iso)
+        parsed.atZoneSameInstant(IST).toLocalTime().format(TIME_DISPLAY_FMT)
+    }.getOrDefault("—")
+}

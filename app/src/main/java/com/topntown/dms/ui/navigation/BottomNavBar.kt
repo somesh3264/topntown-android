@@ -3,15 +3,15 @@ package com.topntown.dms.ui.navigation
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AssignmentTurnedIn
-import androidx.compose.material.icons.filled.CurrencyRupee
+import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.LocalShipping
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.outlined.AssignmentTurnedIn
-import androidx.compose.material.icons.outlined.CurrencyRupee
+import androidx.compose.material.icons.outlined.CreditCard
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.LocalShipping
-import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -43,6 +43,12 @@ data class BottomNavItem(
     val unselectedIcon: ImageVector
 )
 
+/**
+ * Five-tab nav: Home · Order · Deliver · Pay · Stock.
+ * Profile was removed from the tab bar; logout is accessed via the top app bar
+ * profile icon (see NavGraph). The underlying Beat and Payments routes are
+ * kept — only the tab label changes to "Deliver" / "Pay".
+ */
 private val navItems = listOf(
     BottomNavItem(
         label = "Home",
@@ -57,22 +63,22 @@ private val navItems = listOf(
         unselectedIcon = Icons.Outlined.AssignmentTurnedIn
     ),
     BottomNavItem(
-        label = "Beat",
+        label = "Deliver",
         route = Routes.BEAT,
         selectedIcon = Icons.Filled.LocalShipping,
         unselectedIcon = Icons.Outlined.LocalShipping
     ),
     BottomNavItem(
-        label = "Payments",
+        label = "Pay",
         route = Routes.PAYMENTS,
-        selectedIcon = Icons.Filled.CurrencyRupee,
-        unselectedIcon = Icons.Outlined.CurrencyRupee
+        selectedIcon = Icons.Filled.CreditCard,
+        unselectedIcon = Icons.Outlined.CreditCard
     ),
     BottomNavItem(
-        label = "Profile",
-        route = Routes.PROFILE,
-        selectedIcon = Icons.Filled.Person,
-        unselectedIcon = Icons.Outlined.Person
+        label = "Stock",
+        route = Routes.STOCK,
+        selectedIcon = Icons.Filled.Inventory2,
+        unselectedIcon = Icons.Outlined.Inventory2
     )
 )
 
@@ -101,8 +107,6 @@ fun BottomNavBar(navController: NavController) {
             NavigationBarItem(
                 selected = selected,
                 onClick = {
-                    // Fire a short tick on every tap — including re-taps on the
-                    // already-selected tab — so the press never feels silent.
                     haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     if (!selected) {
                         navController.navigate(item.route) {
@@ -118,13 +122,13 @@ fun BottomNavBar(navController: NavController) {
                     Icon(
                         imageVector = if (selected) item.selectedIcon else item.unselectedIcon,
                         contentDescription = item.label,
-                        modifier = Modifier.size(32.dp)
+                        modifier = Modifier.size(28.dp)
                     )
                 },
                 label = {
                     Text(
                         text = item.label,
-                        fontSize = 14.sp,
+                        fontSize = 12.sp,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
                     )
                 },

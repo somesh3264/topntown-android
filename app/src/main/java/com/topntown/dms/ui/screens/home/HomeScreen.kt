@@ -1,5 +1,6 @@
 package com.topntown.dms.ui.screens.home
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,13 +11,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Inventory2
+import androidx.compose.material.icons.filled.Payments
+import androidx.compose.material.icons.filled.Storefront
+import androidx.compose.material.icons.outlined.Inventory
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
@@ -27,26 +33,34 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import com.topntown.dms.ui.components.LoadingScreen
-import com.topntown.dms.ui.navigation.Routes
-import com.topntown.dms.ui.theme.TntSuccess
 import java.text.NumberFormat
 import java.util.Locale
 
 /**
- * Distributor dashboard — the first screen a signed-in user sees. Layout is
- * deliberately vertical-scroll-only so it stays usable on small phones held in
- * one hand while a user is out on a beat.
+ * Distributor Home.
  *
- * Pull-to-refresh uses the Material3 1.2.x `PullToRefreshContainer` API (newer
- * `PullToRefreshBox` from 1.3+ isn't on this project's compose-bom yet).
+ * Layout:
+ *   • Greeting + name (no subtitle — removed per latest spec).
+ *   • Cut-off countdown card (brown, prominent).
+ *   • 2×2 KPI grid: Deliveries, Cash Collected, SKUs Remaining, Stores on Beat.
+ *   • Today's Deliveries list.
+ *
+ * Navigation to Order / Deliver / Pay / Stock / Profile happens via the bottom
+ * nav and the top-app-bar profile icon — Home does not render its own action
+ * buttons.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -56,16 +70,24 @@ fun HomeScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
+    // Auto-refresh when the user returns to this tab (e.g. after logging a
+    // delivery). Without this, the screen keeps showing stale KPIs until the
+    // user manually pull-to-refreshes.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.refresh()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     if (state.isLoading) {
-        LoadingScreen(message = "Loading today's summary…")
+        LoadingScreen(message = "Loading…")
         return
     }
 
     val pullState = rememberPullToRefreshState()
-
-    // Keep the PullToRefreshState in sync with our ViewModel-driven flag. The
-    // container exposes two events (startRefresh / endRefresh) rather than a
-    // setter, so we react to state transitions via LaunchedEffect.
     LaunchedEffect(pullState.isRefreshing) {
         if (pullState.isRefreshing) viewModel.refresh()
     }
@@ -82,31 +104,29 @@ fun HomeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(vertical = 16.dp),
+            contentPadding = PaddingValues(vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            item { GreetingHeader(name = state.session.fullName, segment = state.greetingSegment) }
+            item {
+                GreetingHeader(
+                    name = state.session.fullName,
+                    segment = state.greetingSegment
+                )
+            }
+
+            if (state.cutoffEnabled) {
+                item {
+                    CutoffCountdownCard(
+                        passed = state.cutoffPassed,
+                        timeUntil = state.timeUntilCutoff,
+                        cutoffTime = state.cutoffTime
+                    )
+                }
+            }
 
             item { KpiGrid(state = state) }
 
-            item { TodaysStockSection(rows = state.topStock) }
-
-            item {
-                ActionButtons(
-                    placeOrderEnabled = state.placeOrderEnabled,
-                    cutOffStatus = state.cutOffStatus,
-                    onStartBeat = {
-                        navController.navigate(Routes.BEAT) {
-                            launchSingleTop = true
-                        }
-                    },
-                    onPlaceOrder = {
-                        navController.navigate(Routes.ORDER) {
-                            launchSingleTop = true
-                        }
-                    }
-                )
-            }
+            item { TodaysDeliveriesSection(deliveries = state.todaysDeliveries) }
         }
 
         PullToRefreshContainer(
@@ -121,205 +141,255 @@ private fun GreetingHeader(name: String, segment: String) {
     Column {
         Text(
             text = "Good $segment,",
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-            // Fall back to a generic honorific rather than "Good morning, " with
-            // a trailing comma — happens briefly on cold-start before DataStore
-            // emits the first session value.
             text = name.ifBlank { "Distributor" },
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
+            fontSize = 28.sp,
+            fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onBackground
         )
     }
 }
 
 @Composable
+private fun CutoffCountdownCard(
+    passed: Boolean,
+    timeUntil: String,
+    cutoffTime: String
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        // Brown brand colour (secondary, not primary) — matches the mockup's
+        // warm chocolate header. Primary stays navy and is reserved for the
+        // bottom-nav indicator + other small accents.
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondary,
+            contentColor = MaterialTheme.colorScheme.onSecondary
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 18.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    text = if (passed) "Order cut-off" else "Order cut-off in",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSecondary.copy(alpha = 0.8f)
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = if (passed) "Closed" else timeUntil,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = "Cut-off",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSecondary.copy(alpha = 0.8f)
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = formatCutoff12h(cutoffTime),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun KpiGrid(state: HomeUiState) {
-    // 2×2 grid, not LazyVerticalGrid — the content is fixed at four tiles so a
-    // plain Row×2 is simpler and composes at a predictable height.
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            KpiCard(
+            KpiTile(
                 modifier = Modifier.weight(1f),
-                title = "Deliveries Today",
-                value = "${state.deliveriesToday}/${state.assignedStoresToday.coerceAtLeast(state.deliveriesToday)}"
+                icon = Icons.Filled.Inventory2,
+                iconTint = Color(0xFFD97706),   // amber-600
+                iconBg = Color(0xFFFEF3C7),     // amber-100
+                value = state.deliveriesCount.toString(),
+                label = "Deliveries"
             )
-            KpiCard(
+            KpiTile(
                 modifier = Modifier.weight(1f),
-                title = "Bill Status",
-                value = state.billLabel,
-                valueSizeSp = 18,
-                valueColor = if (state.billReady) TntSuccess else MaterialTheme.colorScheme.onSurfaceVariant
+                icon = Icons.Filled.Payments,
+                iconTint = Color(0xFF059669),   // emerald-600
+                iconBg = Color(0xFFD1FAE5),     // emerald-100
+                value = formatInr(state.cashCollectedInr),
+                label = "Cash Collected"
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            KpiCard(
+            KpiTile(
                 modifier = Modifier.weight(1f),
-                title = "Stock Remaining",
-                value = "${state.stockRemainingPct}%"
+                icon = Icons.Outlined.Inventory,
+                iconTint = Color(0xFFCA8A04),   // yellow-600
+                iconBg = Color(0xFFFEF9C3),     // yellow-100
+                value = state.skusRemaining.toString(),
+                label = "SKUs Remaining"
             )
-            KpiCard(
+            KpiTile(
                 modifier = Modifier.weight(1f),
-                title = "Payments Collected",
-                value = formatInr(state.paymentsCollectedInr),
-                // Rupee amounts can get wide; drop the number a touch so long
-                // figures don't truncate with an ellipsis.
-                valueSizeSp = 22
+                icon = Icons.Filled.Storefront,
+                iconTint = Color(0xFF0284C7),   // sky-600
+                iconBg = Color(0xFFE0F2FE),     // sky-100
+                value = state.storesOnBeat.toString(),
+                label = "Stores on Beat"
             )
         }
     }
 }
 
 @Composable
-private fun KpiCard(
-    title: String,
+private fun KpiTile(
+    icon: ImageVector,
+    iconTint: Color,
+    iconBg: Color,
     value: String,
-    modifier: Modifier = Modifier,
-    valueSizeSp: Int = 28,
-    valueColor: Color = MaterialTheme.colorScheme.onSurface
+    label: String,
+    modifier: Modifier = Modifier
 ) {
     Card(
         modifier = modifier,
-        shape = MaterialTheme.shapes.large,
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text(
-                text = value,
-                fontSize = valueSizeSp.sp,
-                fontWeight = FontWeight.Bold,
-                color = valueColor,
-                maxLines = 1
-            )
-            Text(
-                text = title,
-                fontSize = 14.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun TodaysStockSection(rows: List<StockRow>) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            text = "Today's Stock",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold
-        )
-        if (rows.isEmpty()) {
-            Text(
-                text = "No stock allocated yet",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        } else {
-            rows.forEach { row -> StockProgressRow(row = row) }
-        }
-    }
-}
-
-@Composable
-private fun StockProgressRow(row: StockRow) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = row.productName.ifBlank { row.sku },
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1
-            )
-            Text(
-                text = "${row.remaining}/${row.allocated}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        LinearProgressIndicator(
-            progress = { row.progress },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(8.dp),
-            color = MaterialTheme.colorScheme.primary,
-            trackColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    }
-}
-
-@Composable
-private fun ActionButtons(
-    placeOrderEnabled: Boolean,
-    cutOffStatus: String,
-    onStartBeat: () -> Unit,
-    onPlaceOrder: () -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Button(
-            onClick = onStartBeat,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = TntSuccess,
-                contentColor = Color.White
-            )
-        ) {
-            Text("Start Beat", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-        }
-
-        Button(
-            onClick = onPlaceOrder,
-            enabled = placeOrderEnabled,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary
-            )
-        ) {
-            Text("Place Order", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-        }
-
-        if (cutOffStatus.isNotBlank()) {
-            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text(
-                    text = cutOffStatus,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (placeOrderEnabled) MaterialTheme.colorScheme.onSurfaceVariant
-                    else MaterialTheme.colorScheme.error
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .background(color = iconBg, shape = RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = iconTint,
+                    modifier = Modifier.size(20.dp)
                 )
             }
+            Text(
+                text = value,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
+            Text(
+                text = label,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
-
-        Spacer(modifier = Modifier.height(8.dp))
     }
 }
 
-/** Formats as ₹ with Indian digit grouping (e.g. ₹1,25,300). */
+@Composable
+private fun TodaysDeliveriesSection(deliveries: List<DeliveryItem>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = "Today's Deliveries",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)
+            )
+            if (deliveries.isEmpty()) {
+                Text(
+                    text = "No deliveries logged yet today.",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)
+                )
+            } else {
+                deliveries.forEachIndexed { idx, d ->
+                    DeliveryRow(item = d)
+                    if (idx < deliveries.lastIndex) {
+                        androidx.compose.material3.HorizontalDivider(
+                            modifier = Modifier.padding(horizontal = 16.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeliveryRow(item: DeliveryItem) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.storeName,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "${item.itemCount} ${if (item.itemCount == 1) "item" else "items"} · ${item.deliveredAt}",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Text(
+            text = formatInr(item.totalValue),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Color(0xFF059669)  // emerald-600 — matches mockup
+        )
+    }
+}
+
+// ── Formatters ───────────────────────────────────────────────────────────────
+
 private fun formatInr(amount: Double): String {
     val fmt = NumberFormat.getCurrencyInstance(Locale("en", "IN"))
     fmt.maximumFractionDigits = 0
     return fmt.format(amount)
+}
+
+private fun formatCutoff12h(hhmm: String): String {
+    val parts = hhmm.split(":").mapNotNull { it.toIntOrNull() }
+    if (parts.size != 2) return hhmm
+    val h = parts[0]
+    val m = parts[1]
+    val suffix = if (h >= 12) "PM" else "AM"
+    val h12 = when {
+        h == 0 -> 12
+        h > 12 -> h - 12
+        else -> h
+    }
+    return "%d:%02d %s".format(h12, m, suffix)
 }
