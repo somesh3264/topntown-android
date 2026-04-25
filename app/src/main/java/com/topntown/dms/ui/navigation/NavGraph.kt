@@ -40,6 +40,7 @@ import com.topntown.dms.ui.screens.order.OrderScreen
 import com.topntown.dms.ui.screens.payments.PaymentsScreen
 import com.topntown.dms.ui.screens.profile.ProfileScreen
 import com.topntown.dms.ui.screens.stock.StockScreen
+import com.topntown.dms.ui.screens.store.MyPendingStoresScreen
 import com.topntown.dms.ui.screens.store.StoreOnboardingScreen
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -68,6 +69,8 @@ object Routes {
     const val BILL = "bill"
     const val PROFILE = "profile"
     const val STORE_ONBOARDING = "store_onboarding"
+    /** Distributor's read-only list of submissions awaiting Super Admin approval. */
+    const val MY_PENDING_STORES = "my_pending_stores"
 }
 
 /**
@@ -282,7 +285,19 @@ fun NavGraph(
 
                 composable(Routes.STORE_ONBOARDING) {
                     StoreOnboardingScreen(
-                        onComplete = { navController.popBackStack() }
+                        onComplete = { navController.popBackStack() },
+                        onViewPending = {
+                            navController.navigate(Routes.MY_PENDING_STORES) {
+                                launchSingleTop = true
+                            }
+                        },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+
+                composable(Routes.MY_PENDING_STORES) {
+                    MyPendingStoresScreen(
+                        onBack = { navController.popBackStack() }
                     )
                 }
             }

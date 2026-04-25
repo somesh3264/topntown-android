@@ -15,6 +15,17 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- Camera for the mandatory live shop photo (BR-12) captured while
+         onboarding a new store. The TakePicturePreview contract used by the
+         onboarding screen doesn't need a FileProvider, only CAMERA. We mark
+         the hardware feature as not-required so the APK still installs on
+         the rare distributor handset without a camera (they can keep using
+         the dashboard for onboarding in that case). -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
     <application
         android:name=".TopNTownApp"
         android:allowBackup = "true"
